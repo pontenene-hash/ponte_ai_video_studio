@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw, ImageFont
 st.set_page_config(page_title='PONTE AI Video Studio', page_icon='🎬', layout='centered')
 st.markdown('''<style>.block-container{padding-top:1rem;max-width:850px}div.stButton>button{border-radius:12px}h1{font-size:1.8rem!important}</style>''',unsafe_allow_html=True)
 st.title('🎬 PONTE AI Video Studio')
-st.caption('iPhone対応 | Google Flow 半自動動画制作 | v1.4・画面切替／ダウンロード復帰改善')
+st.caption('iPhone対応 | Google Flow 半自動動画制作 | v1.5・作業復元／iPhone保存改善')
 GENRES=['整骨院・整体','鍼灸','症状別の健康情報','ぽんトレ・パーソナルトレーニング','ぽんてアロマサロン','訪問鍼灸・マッサージ']
 GENRE_ACTION={GENRES[0]:'施術前の相談と姿勢・動作の確認',GENRES[1]:'鍼灸師による丁寧な説明と落ち着いた施術環境',GENRES[2]:'日常生活での困りごとと安全なセルフケア',GENRES[3]:'トレーナーの見守りによる無理のない運動',GENRES[4]:'心地よいアロマトリートメントと落ち着いたサロン',GENRES[5]:'利用者宅での相談と穏やかな機能訓練'}
 SCENES=[('共感','悩みを抱える人物の日常シーン'),('困りごと','日常生活で困る具体的な動作'),('背景','悩みに関係する生活習慣を表すシーン'),('対策','無理のない安全な対策・動作'),('サービス','専門スタッフが相談やサポートを行う様子'),('予約案内','安心した表情の人物と清潔な施設の風景')]
@@ -16,6 +16,11 @@ if 'output' not in st.session_state: st.session_state.output=None
 if 'render_key' not in st.session_state: st.session_state.render_key=None
 if 'production_log' not in st.session_state: st.session_state.production_log={}
 if 'plan_start' not in st.session_state: st.session_state.plan_start=datetime.date.today()
+if 'assets' not in st.session_state: st.session_state.assets={}
+if 'music_asset' not in st.session_state: st.session_state.music_asset=None
+if 'config' not in st.session_state: st.session_state.config={}
+if 'daily_settings' not in st.session_state: st.session_state.daily_settings={'daily_limit':50,'cost_per_clip':10,'other_daily':0}
+
 
 def font_path():
     candidates=['/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc','/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc','/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf']
@@ -93,19 +98,133 @@ def make_video(files, captions, duration, music, title, ticker=False):
         return final.read_bytes()
     finally: shutil.rmtree(tmp,ignore_errors=True)
 
+
+class SavedUpload:
+    def __init__(self,name,data): self.name=name;self._data=data
+    def getvalue(self): return self._data
+
+def project_manifest():
+    return {'version':2,'config':st.session_state.get('config',{}),
+            'prompts':{str(k):v for k,v in st.session_state.prompts.items()},
+            'production_log':st.session_state.get('production_log',{}),
+            'progress':[bool(st.session_state.get(f'progress_{i}',False)) for i in range(6)],
+            'plan_start':st.session_state.plan_start.isoformat(),
+            'daily_settings':st.session_state.get('daily_settings',{}),
+            'assets':{str(k):v['name'] for k,v in st.session_state.assets.items()},
+            'music':st.session_state.music_asset['name'] if st.session_state.music_asset else None,
+            'has_output':bool(st.session_state.output)}
+
+def project_zip(include_media=True):
+    buffer=io.BytesIO()
+    with zipfile.ZipFile(buffer,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=1) as z:
+        z.writestr('project.json',json.dumps(project_manifest(),ensure_ascii=False,indent=2))
+        if include_media:
+            for k,v in st.session_state.assets.items():
+                z.writestr(f'media/scene_{k}{Path(v["name"]).suffix.lower() or ".mp4"}',v['bytes'])
+            if st.session_state.music_asset:
+                v=st.session_state.music_asset
+                z.writestr('media/music'+(Path(v['name']).suffix.lower() or '.mp3'),v['bytes'])
+            if st.session_state.output:
+                z.writestr('output/completed.mp4',st.session_state.output)
+    return buffer.getvalue()
+
+def restore_project(blob):
+    with zipfile.ZipFile(io.BytesIO(blob)) as z:
+        names=z.namelist()
+        if len(names)>30 or sum(x.file_size for x in z.infolist())>650*1024*1024:
+            raise ValueError('バックアップの容量またはファイル数が上限を超えています')
+        if 'project.json' not in names: raise ValueError('project.jsonが含まれていません')
+        data=json.loads(z.read('project.json'))
+        if not isinstance(data,dict) or 'prompts' not in data: raise ValueError('プロジェクト形式が正しくありません')
+        cfg=data.get('config',{})
+        st.session_state.config=cfg
+        for key in ('genre','topic','audience','seconds','style','character','language','location'):
+            if key in cfg: st.session_state['setting_'+key]=cfg[key]
+        st.session_state.prompts={int(k):v for k,v in data['prompts'].items() if str(k).isdigit() and 0<=int(k)<6}
+        for i,v in st.session_state.prompts.items():
+            st.session_state[f'prompt_{i}']=v.get('prompt','')
+            st.session_state[f'caption_{i}']=v.get('caption','')
+        for i,v in enumerate(data.get('progress',[])[:6]):st.session_state[f'progress_{i}']=bool(v)
+        st.session_state.plan_start=datetime.date.fromisoformat(data.get('plan_start',datetime.date.today().isoformat()))
+        st.session_state.daily_settings=data.get('daily_settings',{})
+        st.session_state.production_log=data.get('production_log',{})
+        st.session_state.assets={}
+        for i in range(6): st.session_state.pop(f'video_{i}',None)
+        for i in range(6):
+            paths=[n for n in names if n.startswith(f'media/scene_{i}.')]
+            if paths:
+                name=data.get('assets',{}).get(str(i),Path(paths[0]).name)
+                st.session_state.assets[i]={'name':name,'bytes':z.read(paths[0])}
+        tracks=[n for n in names if n.startswith('media/music.')]
+        st.session_state.music_asset={'name':data.get('music') or 'music.mp3','bytes':z.read(tracks[0])} if tracks else None
+        st.session_state.output=z.read('output/completed.mp4') if 'output/completed.mp4' in names else None
+
+def restore_json(blob):
+    data=json.loads(blob)
+    if 'scenes' in data: data={'prompts':data['scenes'],'config':data.get('config',{})}
+    if 'plan' in data and 'prompts' not in data:
+        for row in data['plan']:
+            i=int(row.get('scene',0))-1
+            if 0<=i<6: st.session_state[f'progress_{i}']=bool(row.get('done',False))
+        st.session_state.daily_settings={k:data[k] for k in ('daily_limit','other_daily','cost_per_clip') if k in data}
+        return '日別計画・進捗を復元しました（台本は含まれていません）。'
+    if 'prompts' not in data: raise ValueError('対応するJSONではありません')
+    st.session_state.config=data.get('config',{})
+    for key,val in st.session_state.config.items():
+        if key in ('genre','topic','audience','seconds','style','character','language','location'):st.session_state['setting_'+key]=val
+    st.session_state.prompts={int(k):v for k,v in data['prompts'].items() if str(k).isdigit() and 0<=int(k)<6}
+    for i,v in st.session_state.prompts.items():
+        st.session_state[f'prompt_{i}']=v.get('prompt','')
+        st.session_state[f'caption_{i}']=v.get('caption','')
+    return '台本・プロンプトを復元しました。動画素材は必要に応じて再アップロードしてください。'
+
 PAGES=['① 企画','② 日別制作計画','③ Flowプロンプト','④ 素材・編集','⑤ 完成・保存']
-st.info('📱 iPhoneでJSON/CSVを開くと、iOSのファイルプレビュー画面に切り替わります。アプリに戻るにはSafariの元のタブを開いてください。アプリ内では下の画面切替を使えます。')
-page=st.radio('📍 作業画面を選択',PAGES, horizontal=True, key='active_page')
-st.caption('ダウンロードを押しても入力内容を消さない設定です。JSON保存は必須ではありません。')
+st.info('📱 iPhoneでJSONを直接開くと、iOSのプレビュー画面に移動する場合があります。作業保存は「ZIPバックアップ」を推奨します。ダウンロード後はSafariの元のタブへ戻ってください。')
+page=st.radio('📍 作業画面を選択',PAGES+['⑥ 保存・再開'],horizontal=True,key='active_page')
+st.caption('画面を切り替えても作業は保持されます。ただしStreamlitの再起動・接続切断に備えてZIPバックアップを保存してください。')
+if page == '⑥ 保存・再開':
+    st.subheader('💾 作業の保存・再開')
+    st.write('**中断する前**にZIPを保存し、**再開時**にそのZIPをアップロードしてください。台本・日別進捗・動画素材・BGM・完成MP4を復元できます。')
+    include_media=st.checkbox('動画素材・BGM・完成MP4もバックアップに含める',value=True)
+    st.warning('動画を含むZIPは大きくなります。iPhoneで容量不足の場合はチェックを外して台本と進捗のみ保存してください。')
+    if st.button('📦 バックアップファイルを準備',use_container_width=True):
+        try:
+            st.session_state.backup_blob=project_zip(include_media)
+            st.success('準備できました。下のZIPを保存してください。')
+        except Exception as e: st.error(f'バックアップの準備に失敗しました：{e}')
+    if st.session_state.get('backup_blob'):
+        st.download_button('⬇️ 作業バックアップ（ZIP）を保存',st.session_state.backup_blob,
+                           file_name='PONTE_project_'+datetime.date.today().strftime('%Y%m%d')+'.zip',
+                           mime='application/zip',on_click='ignore',use_container_width=True)
+    st.divider()
+    st.markdown('**以前の作業を再開する**')
+    restore_file=st.file_uploader('以前保存したZIPまたは旧版JSONを選択',type=['zip','json'],key='restore_file')
+    if restore_file and st.button('🔄 このファイルから作業を復元',type='primary',use_container_width=True):
+        try:
+            if restore_file.name.lower().endswith('.zip'):
+                restore_project(restore_file.getvalue())
+                message='台本・進捗・保存済み動画を復元しました。'
+            else: message=restore_json(restore_file.getvalue())
+            st.session_state.backup_blob=None
+            st.session_state.restore_notice=message
+            st.rerun()
+        except Exception as e: st.error(f'復元できませんでした：{e}')
+    if st.session_state.get('restore_notice'):
+        st.success(st.session_state.pop('restore_notice'))
+    st.info('旧版の ponte_prompts.json は台本のみ、ponte_daily_plan.json は進捗のみ復元できます。両方を完全統合するには、それぞれ順に読み込んでください。')
+    st.markdown('**iPhoneでファイル画面から戻るには**：Safariに戻り、タブ一覧からStreamlitの画面を選びます。ChatGPT内ブラウザの場合はSafariでアプリURLを開き直す方が安定します。')
 if page == PAGES[0]:
-    genre=st.selectbox('ジャンル',GENRES)
-    topic=st.text_input('テーマ','肩こり')
-    audience=st.text_input('対象者','30〜50代の女性')
-    seconds=st.selectbox('完成動画の長さ（秒）',[30,45,60],index=1)
-    style=st.selectbox('映像の雰囲気',['リアルな実写広告風','温かみのある自然な映像','上品で落ち着いた広告風','親しみやすいイラスト風'])
-    character=st.text_input('共通人物設定','40代の日本人女性、自然な表情、清潔感のある服装')
-    language=st.selectbox('動画内の言語',['日本語（推奨）','映像は無音・字幕のみ日本語','英語'],index=0)
-    location=st.text_input('背景・店舗設定','明るく清潔で親しみやすい日本の施設')
+    for k,v in st.session_state.get('config',{}).items():
+        if k in ('genre','topic','audience','seconds','style','character','language','location') and 'setting_'+k not in st.session_state:
+            st.session_state['setting_'+k]=v
+    genre=st.selectbox('ジャンル',GENRES,key='setting_genre')
+    topic=st.text_input('テーマ','肩こり',key='setting_topic')
+    audience=st.text_input('対象者','30〜50代の女性',key='setting_audience')
+    seconds=st.selectbox('完成動画の長さ（秒）',[30,45,60],index=1,key='setting_seconds')
+    style=st.selectbox('映像の雰囲気',['リアルな実写広告風','温かみのある自然な映像','上品で落ち着いた広告風','親しみやすいイラスト風'],key='setting_style')
+    character=st.text_input('共通人物設定','40代の日本人女性、自然な表情、清潔感のある服装',key='setting_character')
+    language=st.selectbox('動画内の言語',['日本語（推奨）','映像は無音・字幕のみ日本語','英語'],index=0,key='setting_language')
+    location=st.text_input('背景・店舗設定','明るく清潔で親しみやすい日本の施設',key='setting_location')
     st.session_state.config=dict(genre=genre,topic=topic,audience=audience,seconds=seconds,style=style,character=character,location=location,language=language)
     st.info('台本はテンプレートから自動作成します。外部AI APIは不要です。各シーンは次のタブで自由に編集できます。')
     if st.button('6シーンの構成を作成',type='primary',use_container_width=True):
@@ -127,12 +246,13 @@ if page == PAGES[1]:
     st.info('この画面は手動管理です。Google Flowの残高・生成履歴とは自動同期しません。クレジット単価や無料枠は変更されることがあるため、Flow画面の表示を優先してください。')
     c1,c2=st.columns(2)
     with c1:
-        daily_limit=st.number_input('1日の利用可能クレジット',min_value=1,max_value=10000,value=50,step=10)
-        cost_per_clip=st.number_input('8秒動画1本の消費クレジット',min_value=1,max_value=10000,value=10,step=1)
+        daily_limit=st.number_input('1日の利用可能クレジット',min_value=1,max_value=10000,value=int(st.session_state.daily_settings.get('daily_limit',50)),step=10)
+        cost_per_clip=st.number_input('8秒動画1本の消費クレジット',min_value=1,max_value=10000,value=int(st.session_state.daily_settings.get('cost_per_clip',10)),step=1)
     with c2:
         start_date=st.date_input('制作開始日',value=st.session_state.plan_start)
-        other_daily=st.number_input('他の制作で使うクレジット／日',min_value=0,max_value=10000,value=0,step=5)
+        other_daily=st.number_input('他の制作で使うクレジット／日',min_value=0,max_value=10000,value=int(st.session_state.daily_settings.get('other_daily',0)),step=5)
     st.session_state.plan_start=start_date
+    st.session_state.daily_settings={'daily_limit':int(daily_limit),'cost_per_clip':int(cost_per_clip),'other_daily':int(other_daily)}
     usable=max(0,int(daily_limit)-int(other_daily))
     max_scenes_per_day=3
     clips_per_day=min(max_scenes_per_day,usable//int(cost_per_clip))
@@ -182,12 +302,30 @@ if page == PAGES[3]:
     for i in range(6):
         st.markdown(f'**シーン{i+1}：{SCENES[i][0]}**')
         upload=st.file_uploader(f'動画 {i+1}',type=['mp4','mov','m4v'],key=f'video_{i}')
-        uploads.append(upload)
-        if upload: st.video(upload)
+        if upload:
+            old=st.session_state.assets.get(i)
+            if old is None or old['name']!=upload.name or old['bytes']!=upload.getvalue():
+                st.session_state.assets[i]={'name':upload.name,'bytes':upload.getvalue()}
+        saved=st.session_state.assets.get(i)
+        if saved:
+            st.caption('保存済み：'+saved['name'])
+            st.video(saved['bytes'])
+            if st.button('このシーンの素材を削除',key=f'remove_video_{i}'):
+                st.session_state.assets.pop(i,None)
+                st.rerun()
+            uploads.append(SavedUpload(saved['name'],saved['bytes']))
+        else: uploads.append(None)
     ticker=st.checkbox('テロップを下から流して表示（各シーン冒頭でスライドイン）',value=True,help='字幕は日本語で各シーンの間表示されます。オフなら固定表示です。')
     st.info('字幕は③の各シーン「完成動画の字幕」で変更できます。Flow内の文字生成は使わず、MP4結合時に正確な日本語字幕を追加します。')
     music=st.file_uploader('BGM（任意・商用利用可能なMP3/WAV/M4A）',type=['mp3','wav','m4a'])
-    if music: st.audio(music)
+    if music: st.session_state.music_asset={'name':music.name,'bytes':music.getvalue()}
+    if st.session_state.music_asset:
+        st.caption('BGM保存済み：'+st.session_state.music_asset['name'])
+        st.audio(st.session_state.music_asset['bytes'])
+        if st.button('BGMを削除'):
+            st.session_state.music_asset=None
+            st.rerun()
+    music=SavedUpload(st.session_state.music_asset['name'],st.session_state.music_asset['bytes']) if st.session_state.music_asset else None
     if st.button('🎞️ 45秒動画を結合・字幕とBGMを追加',type='primary',use_container_width=True):
         if not all(uploads): st.error('6シーンすべての動画をアップロードしてください。')
         elif not st.session_state.prompts: st.error('①で構成を作成してください。')
@@ -195,7 +333,7 @@ if page == PAGES[3]:
             with st.spinner('動画を処理しています。iPhoneではしばらく時間がかかる場合があります…'):
                 try:
                     captions=[st.session_state.prompts[i]['caption'] for i in range(6)]
-                    result=make_video(uploads,captions,st.session_state.get('config',{}).get('seconds',45),music,topic,ticker=ticker)
+                    result=make_video(uploads,captions,st.session_state.get('config',{}).get('seconds',45),music,st.session_state.get('config',{}).get('topic',''),ticker=ticker)
                     st.session_state.output=result
                     st.success('MP4を生成しました。⑤のタブで確認してください。')
                 except Exception as e: st.error('動画処理に失敗しました。入力形式・容量を確認してください。');st.code(str(e))
@@ -205,5 +343,6 @@ if page == PAGES[4]:
         st.video(st.session_state.output)
         st.download_button('⬇️ 完成MP4をダウンロード',st.session_state.output,file_name='PONTE_AI_Video_Studio.mp4',mime='video/mp4',use_container_width=True,on_click='ignore')
     else: st.info('④で動画を結合すると、ここにプレビューとダウンロードボタンが表示されます。')
+    st.info('中断・再開する場合は⑥ 保存・再開からZIPバックアップを作成してください。')
     st.markdown('---')
     st.caption('注意：無料Streamlit Cloudでは大きな動画の処理がメモリ・実行時間制限で失敗することがあります。動画は一時処理し、永続保存しません。患者様の実写素材は同意を得たものだけ使用してください。')
