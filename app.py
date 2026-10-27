@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw, ImageFont
 st.set_page_config(page_title='PONTE AI Video Studio', page_icon='🎬', layout='centered')
 st.markdown('''<style>.block-container{padding-top:1rem;max-width:850px}div.stButton>button{border-radius:12px}h1{font-size:1.8rem!important}</style>''',unsafe_allow_html=True)
 st.title('🎬 PONTE AI Video Studio')
-st.caption('iPhone対応 | Google Flow 半自動動画制作 | v1.6・タブ切替／アプリ内保存・復元')
+st.caption('iPhone対応 | Google Flow 半自動動画制作 | v1.7・日本語コメントの動くテロップ')
 GENRES=['整骨院・整体','鍼灸','症状別の健康情報','ぽんトレ・パーソナルトレーニング','ぽんてアロマサロン','訪問鍼灸・マッサージ']
 GENRE_ACTION={GENRES[0]:'施術前の相談と姿勢・動作の確認',GENRES[1]:'鍼灸師による丁寧な説明と落ち着いた施術環境',GENRES[2]:'日常生活での困りごとと安全なセルフケア',GENRES[3]:'トレーナーの見守りによる無理のない運動',GENRES[4]:'心地よいアロマトリートメントと落ち着いたサロン',GENRES[5]:'利用者宅での相談と穏やかな機能訓練'}
 SCENES=[('共感','悩みを抱える人物の日常シーン'),('困りごと','日常生活で困る具体的な動作'),('背景','悩みに関係する生活習慣を表すシーン'),('対策','無理のない安全な対策・動作'),('サービス','専門スタッフが相談やサポートを行う様子'),('予約案内','安心した表情の人物と清潔な施設の風景')]
@@ -68,7 +68,7 @@ document.getElementById('copy').onclick=async()=>{{
 }};
 </script>''',height=58)
 
-def make_video(files, captions, duration, music, title, ticker=False):
+def make_video(files, captions, duration, music, title, ticker_mode="下からスライドイン"):
     tmp=Path(tempfile.mkdtemp(prefix='ponte_'))
     parts=[]; per=duration/len(files)
     try:
@@ -83,9 +83,14 @@ def make_video(files, captions, duration, music, title, ticker=False):
             # Freeze final frame if source is shorter than requested duration
             vf+=f',tpad=stop_mode=clone:stop_duration={max(0,per-actual)+0.3:.3f}'
             overlay_expr='0:0'
-            # Ticker mode: caption slides up into view during the opening second.
-            if ticker: overlay_expr='0:H-min(t*180\,h)'
-            run(['ffmpeg','-y','-loglevel','error','-i',str(src),'-loop','1','-i',str(overlay),'-filter_complex',f'[0:v]{vf}[base];[base][1:v]overlay={overlay_expr}:shortest=0[out]','-map','[out]','-t',str(per),'-an','-c:v','libx264','-preset','ultrafast','-crf','29','-pix_fmt','yuv420p','-movflags','+faststart',str(dst)])
+            overlay_filter='[1:v]format=rgba[cap];'
+            if ticker_mode=='下からスライドイン':
+                overlay_expr='0:max(0\,H-min(t*1200\,H))'
+            elif ticker_mode=='右からスライドイン':
+                overlay_expr='max(0\,W-min(t*850\,W)):0'
+            elif ticker_mode=='フェードイン':
+                overlay_filter='[1:v]format=rgba,fade=t=in:st=0:d=1:alpha=1[cap];'
+            run(['ffmpeg','-y','-loglevel','error','-i',str(src),'-loop','1','-i',str(overlay),'-filter_complex',f'[0:v]{vf}[base];{overlay_filter}[base][cap]overlay={overlay_expr}:shortest=0[out]','-map','[out]','-t',str(per),'-an','-c:v','libx264','-preset','ultrafast','-crf','29','-pix_fmt','yuv420p','-movflags','+faststart',str(dst)])
             parts.append(dst)
         listing=tmp/'concat.txt';listing.write_text(''.join(f"file '{p}'\n" for p in parts))
         silent=tmp/'silent.mp4'
@@ -338,7 +343,7 @@ if page == PAGES[3]:
                 st.rerun()
             uploads.append(SavedUpload(saved['name'],saved['bytes']))
         else: uploads.append(None)
-    ticker=st.checkbox('テロップを下から流して表示（各シーン冒頭でスライドイン）',value=True,help='字幕は日本語で各シーンの間表示されます。オフなら固定表示です。')
+    ticker_mode=st.selectbox('🎞️ 日本語コメントのテロップ演出',['下からスライドイン','右からスライドイン','フェードイン','固定表示'],help='③の各シーンで入力した日本語コメントを、MP4結合時に映像へ焼き込みます。')
     st.info('字幕は③の各シーン「完成動画の字幕」で変更できます。Flow内の文字生成は使わず、MP4結合時に正確な日本語字幕を追加します。')
     music=st.file_uploader('BGM（任意・商用利用可能なMP3/WAV/M4A）',type=['mp3','wav','m4a'])
     if music: st.session_state.music_asset={'name':music.name,'bytes':music.getvalue()}
@@ -356,7 +361,7 @@ if page == PAGES[3]:
             with st.spinner('動画を処理しています。iPhoneではしばらく時間がかかる場合があります…'):
                 try:
                     captions=[st.session_state.prompts[i]['caption'] for i in range(6)]
-                    result=make_video(uploads,captions,st.session_state.get('config',{}).get('seconds',45),music,st.session_state.get('config',{}).get('topic',''),ticker=ticker)
+                    result=make_video(uploads,captions,st.session_state.get('config',{}).get('seconds',45),music,st.session_state.get('config',{}).get('topic',''),ticker_mode=ticker_mode)
                     st.session_state.output=result
                     st.success('MP4を生成しました。⑤のタブで確認してください。')
                 except Exception as e: st.error('動画処理に失敗しました。入力形式・容量を確認してください。');st.code(str(e))
