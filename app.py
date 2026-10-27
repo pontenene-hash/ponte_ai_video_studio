@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw, ImageFont
 st.set_page_config(page_title='PONTE AI Video Studio', page_icon='🎬', layout='centered')
 st.markdown('''<style>.block-container{padding-top:1rem;max-width:850px}div.stButton>button{border-radius:12px}h1{font-size:1.8rem!important}</style>''',unsafe_allow_html=True)
 st.title('🎬 PONTE AI Video Studio')
-st.caption('iPhone対応 | Google Flow 半自動動画制作 | v1.5・作業復元／iPhone保存改善')
+st.caption('iPhone対応 | Google Flow 半自動動画制作 | v1.6・タブ切替／アプリ内保存・復元')
 GENRES=['整骨院・整体','鍼灸','症状別の健康情報','ぽんトレ・パーソナルトレーニング','ぽんてアロマサロン','訪問鍼灸・マッサージ']
 GENRE_ACTION={GENRES[0]:'施術前の相談と姿勢・動作の確認',GENRES[1]:'鍼灸師による丁寧な説明と落ち着いた施術環境',GENRES[2]:'日常生活での困りごとと安全なセルフケア',GENRES[3]:'トレーナーの見守りによる無理のない運動',GENRES[4]:'心地よいアロマトリートメントと落ち着いたサロン',GENRES[5]:'利用者宅での相談と穏やかな機能訓練'}
 SCENES=[('共感','悩みを抱える人物の日常シーン'),('困りごと','日常生活で困る具体的な動作'),('背景','悩みに関係する生活習慣を表すシーン'),('対策','無理のない安全な対策・動作'),('サービス','専門スタッフが相談やサポートを行う様子'),('予約案内','安心した表情の人物と清潔な施設の風景')]
@@ -179,12 +179,31 @@ def restore_json(blob):
     return '台本・プロンプトを復元しました。動画素材は必要に応じて再アップロードしてください。'
 
 PAGES=['① 企画','② 日別制作計画','③ Flowプロンプト','④ 素材・編集','⑤ 完成・保存']
-st.info('📱 iPhoneでJSONを直接開くと、iOSのプレビュー画面に移動する場合があります。作業保存は「ZIPバックアップ」を推奨します。ダウンロード後はSafariの元のタブへ戻ってください。')
-page=st.radio('📍 作業画面を選択',PAGES+['⑥ 保存・再開'],horizontal=True,key='active_page')
+st.info('📱 ファイルのプレビュー画面へ移動しないよう、計画・プロンプトはアプリ内で表示・コピーできます。動画・ZIPの保存時のみiPhoneの保存画面が開く場合があります。')
+page=st.segmented_control('📍 画面を切り替える',PAGES+['⑥ 保存・再開'],default=PAGES[0],key='active_page',selection_mode='single') or PAGES[0]
 st.caption('画面を切り替えても作業は保持されます。ただしStreamlitの再起動・接続切断に備えてZIPバックアップを保存してください。')
 if page == '⑥ 保存・再開':
     st.subheader('💾 作業の保存・再開')
-    st.write('**中断する前**にZIPを保存し、**再開時**にそのZIPをアップロードしてください。台本・日別進捗・動画素材・BGM・完成MP4を復元できます。')
+    st.write('**画面を移動せずに保存したい場合**は、下の「保存用テキスト」をコピーしてiPhoneのメモに貼り付けてください。翌日はそのテキストを貼り付けると台本・進捗を復元できます。動画素材を含む場合はZIPバックアップを使用します。')
+    st.markdown('#### 📋 アプリ内で保存（ダウンロード不要）')
+    project_text=json.dumps(project_manifest(),ensure_ascii=False,indent=2)
+    st.code(project_text,language='json')
+    copy_widget(project_text,99)
+    st.caption('コピーした内容をiPhoneの「メモ」に貼り付けて保管してください。動画・BGMの実ファイルは含みません。')
+    resume_text=st.text_area('🔄 前回の保存用テキストを貼り付け',height=110,key='resume_text',placeholder='前回コピーしたJSONテキストをここに貼り付け')
+    if st.button('貼り付けたテキストから再開',use_container_width=True,disabled=not resume_text.strip()):
+        try:
+            data=json.loads(resume_text)
+            if 'version' in data and 'progress' in data and 'prompts' in data:
+                restore_json(json.dumps(data,ensure_ascii=False).encode('utf-8'))
+                for i,done in enumerate(data.get('progress',[])[:6]): st.session_state[f'progress_{i}']=bool(done)
+                st.session_state.daily_settings=data.get('daily_settings',st.session_state.daily_settings)
+                st.session_state.plan_start=datetime.date.fromisoformat(data.get('plan_start',datetime.date.today().isoformat()))
+            else: restore_json(resume_text.encode('utf-8'))
+            st.success('台本と進捗を復元しました。上のタブで制作を再開できます。')
+        except Exception as e: st.error(f'復元できませんでした：{e}')
+    st.divider()
+    st.markdown('#### 📦 動画素材も含めて保存（任意）')
     include_media=st.checkbox('動画素材・BGM・完成MP4もバックアップに含める',value=True)
     st.warning('動画を含むZIPは大きくなります。iPhoneで容量不足の場合はチェックを外して台本と進捗のみ保存してください。')
     if st.button('📦 バックアップファイルを準備',use_container_width=True):
@@ -278,8 +297,10 @@ if page == PAGES[1]:
                 st.checkbox(f'シーン{row["scene"]}：{row["name"]}　（{row["credits"]}cr）',key=f'progress_{idx}',help='Flowで生成・保存できたらチェックしてください')
         st.caption('各日最大3シーンに制限し、残りのクレジットを再生成用に確保します。再生成もクレジットを消費します。再生成時は「他の制作で使うクレジット／日」に追加消費を反映するか、開始日を調整してください。50クレジットは1日の予算上限であり、利用可能残高を保証しません。')
         plan_export={'daily_limit':int(daily_limit),'other_daily':int(other_daily),'cost_per_clip':int(cost_per_clip),'plan':[{**row,'done':bool(st.session_state.get(f'progress_{row["scene"]-1}',False))} for row in plan]}
-        st.download_button('📥 日別制作計画・進捗をJSON保存',json.dumps(plan_export,ensure_ascii=False,indent=2).encode('utf-8'),file_name='ponte_daily_plan.json',mime='application/json',use_container_width=True,on_click='ignore')
-        st.download_button('📥 日別制作計画をCSV保存',('日付,シーン,内容,クレジット,完了\n'+''.join(f'{row["date"]},{row["scene"]},{row["name"]},{row["credits"]},{int(st.session_state.get(f"progress_{row["scene"]-1}",False))}\n' for row in plan)).encode('utf-8-sig'),file_name='ponte_daily_plan.csv',mime='text/csv',use_container_width=True,on_click='ignore')
+        st.markdown('**📋 日別計画・進捗をアプリ内でコピー**')
+        st.code(json.dumps(plan_export,ensure_ascii=False,indent=2),language='json')
+        copy_widget(json.dumps(plan_export,ensure_ascii=False,indent=2),97)
+        st.caption('JSON/CSVの直接ダウンロードボタンは、iPhoneでプレビュー画面に移動するため廃止しました。')
     st.markdown('**月4本の目安**：6シーン×4本＝24クリップ。単価10crなら240crです。無料日次枠だけを使う場合は、1動画につき2日以上に分けて作成します。')
 if page == PAGES[2]:
     if not st.session_state.prompts: st.warning('①で「6シーンの構成を作成」を押してください。')
@@ -295,7 +316,9 @@ if page == PAGES[2]:
                 st.code(data['prompt'],language=None)
         payload={'config':st.session_state.get('config',{}),'scenes':st.session_state.prompts}
         st.info('📋 プロンプトは上の各シーンで直接コピーできます。JSONの保存は任意です。')
-        st.download_button('📄 全プロンプトをJSONで保存',json.dumps(payload,ensure_ascii=False,indent=2).encode(),file_name='ponte_prompts.json',mime='application/json',use_container_width=True,on_click='ignore')
+        st.markdown('**📋 全プロンプトをまとめてコピー**')
+        st.code(json.dumps(payload,ensure_ascii=False,indent=2),language='json')
+        copy_widget(json.dumps(payload,ensure_ascii=False,indent=2),98)
 if page == PAGES[3]:
     st.caption('Flowから保存したMP4をシーン順にアップロードします。個別に再生して確認できます。')
     uploads=[]
