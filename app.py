@@ -7,10 +7,13 @@ from PIL import Image, ImageDraw, ImageFont
 st.set_page_config(page_title='PONTE AI Video Studio', page_icon='🎬', layout='centered')
 st.markdown('''<style>.block-container{padding-top:1rem;max-width:850px}div.stButton>button{border-radius:12px}h1{font-size:1.8rem!important}</style>''',unsafe_allow_html=True)
 st.title('🎬 PONTE AI Video Studio')
-st.caption('iPhone対応 | Google Flow 半自動動画制作 | v1.7・日本語コメントの動くテロップ')
+st.caption('iPhone対応 | Google Flow 半自動動画制作 | v1.8・店舗/スタッフ写真登録・Flow参考画像・作業復元')
 GENRES=['整骨院・整体','鍼灸','症状別の健康情報','ぽんトレ・パーソナルトレーニング','ぽんてアロマサロン','訪問鍼灸・マッサージ']
 GENRE_ACTION={GENRES[0]:'施術前の相談と姿勢・動作の確認',GENRES[1]:'鍼灸師による丁寧な説明と落ち着いた施術環境',GENRES[2]:'日常生活での困りごとと安全なセルフケア',GENRES[3]:'トレーナーの見守りによる無理のない運動',GENRES[4]:'心地よいアロマトリートメントと落ち着いたサロン',GENRES[5]:'利用者宅での相談と穏やかな機能訓練'}
 SCENES=[('共感','悩みを抱える人物の日常シーン'),('困りごと','日常生活で困る具体的な動作'),('背景','悩みに関係する生活習慣を表すシーン'),('対策','無理のない安全な対策・動作'),('サービス','専門スタッフが相談やサポートを行う様子'),('予約案内','安心した表情の人物と清潔な施設の風景')]
+if 'reference_library' not in st.session_state: st.session_state.reference_library={}
+if 'selected_room' not in st.session_state: st.session_state.selected_room='指定なし'
+if 'selected_staff' not in st.session_state: st.session_state.selected_staff='指定なし'
 if 'prompts' not in st.session_state: st.session_state.prompts={}
 if 'output' not in st.session_state: st.session_state.output=None
 if 'render_key' not in st.session_state: st.session_state.render_key=None
@@ -117,13 +120,17 @@ def project_manifest():
             'daily_settings':st.session_state.get('daily_settings',{}),
             'assets':{str(k):v['name'] for k,v in st.session_state.assets.items()},
             'music':st.session_state.music_asset['name'] if st.session_state.music_asset else None,
-            'has_output':bool(st.session_state.output)}
+            'has_output':bool(st.session_state.output),
+            'references':{k:{'kind':v['kind'],'name':v['name'],'note':v.get('note',''),'filename':v['filename']} for k,v in st.session_state.reference_library.items()},
+            'selected_room':st.session_state.selected_room,'selected_staff':st.session_state.selected_staff}
 
 def project_zip(include_media=True):
     buffer=io.BytesIO()
     with zipfile.ZipFile(buffer,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=1) as z:
         z.writestr('project.json',json.dumps(project_manifest(),ensure_ascii=False,indent=2))
         if include_media:
+            for key,ref in st.session_state.reference_library.items():
+                z.writestr('references/'+key+Path(ref['filename']).suffix.lower(),ref['bytes'])
             for k,v in st.session_state.assets.items():
                 z.writestr(f'media/scene_{k}{Path(v["name"]).suffix.lower() or ".mp4"}',v['bytes'])
             if st.session_state.music_asset:
@@ -153,6 +160,13 @@ def restore_project(blob):
         st.session_state.plan_start=datetime.date.fromisoformat(data.get('plan_start',datetime.date.today().isoformat()))
         st.session_state.daily_settings=data.get('daily_settings',{})
         st.session_state.production_log=data.get('production_log',{})
+        st.session_state.reference_library={}
+        for key,ref in data.get('references',{}).items():
+            matches=[n for n in names if n.startswith('references/'+key+'.')]
+            if matches:
+                st.session_state.reference_library[key]={**ref,'bytes':z.read(matches[0])}
+        st.session_state.selected_room=data.get('selected_room','指定なし')
+        st.session_state.selected_staff=data.get('selected_staff','指定なし')
         st.session_state.assets={}
         for i in range(6): st.session_state.pop(f'video_{i}',None)
         for i in range(6):
@@ -183,7 +197,7 @@ def restore_json(blob):
         st.session_state[f'caption_{i}']=v.get('caption','')
     return '台本・プロンプトを復元しました。動画素材は必要に応じて再アップロードしてください。'
 
-PAGES=['① 企画','② 日別制作計画','③ Flowプロンプト','④ 素材・編集','⑤ 完成・保存']
+PAGES=['① 企画','② 日別制作計画','③ Flowプロンプト','④ 素材・編集','⑤ 完成・保存','⑦ 店舗・人物登録']
 st.info('📱 ファイルのプレビュー画面へ移動しないよう、計画・プロンプトはアプリ内で表示・コピーできます。動画・ZIPの保存時のみiPhoneの保存画面が開く場合があります。')
 page=st.segmented_control('📍 画面を切り替える',PAGES+['⑥ 保存・再開'],default=PAGES[0],key='active_page',selection_mode='single') or PAGES[0]
 st.caption('画面を切り替えても作業は保持されます。ただしStreamlitの再起動・接続切断に備えてZIPバックアップを保存してください。')
@@ -208,9 +222,9 @@ if page == '⑥ 保存・再開':
             st.success('台本と進捗を復元しました。上のタブで制作を再開できます。')
         except Exception as e: st.error(f'復元できませんでした：{e}')
     st.divider()
-    st.markdown('#### 📦 動画素材も含めて保存（任意）')
+    st.markdown('#### 📦 動画・店舗写真・スタッフ写真も含めて保存（推奨）')
     include_media=st.checkbox('動画素材・BGM・完成MP4もバックアップに含める',value=True)
-    st.warning('動画を含むZIPは大きくなります。iPhoneで容量不足の場合はチェックを外して台本と進捗のみ保存してください。')
+    st.warning('登録写真を次回に引き継ぐには、素材入りZIPを選んでください。動画を含むZIPは大きくなります。iPhoneで容量不足の場合はチェックを外して台本と進捗のみ保存してください。')
     if st.button('📦 バックアップファイルを準備',use_container_width=True):
         try:
             st.session_state.backup_blob=project_zip(include_media)
@@ -237,6 +251,31 @@ if page == '⑥ 保存・再開':
         st.success(st.session_state.pop('restore_notice'))
     st.info('旧版の ponte_prompts.json は台本のみ、ponte_daily_plan.json は進捗のみ復元できます。両方を完全統合するには、それぞれ順に読み込んでください。')
     st.markdown('**iPhoneでファイル画面から戻るには**：Safariに戻り、タブ一覧からStreamlitの画面を選びます。ChatGPT内ブラウザの場合はSafariでアプリURLを開き直す方が安定します。')
+if page == '⑦ 店舗・人物登録':
+    st.subheader('🏠 店舗写真・実在スタッフを登録')
+    st.info('写真は現在のセッション内に保存されます。次回も使うには⑥「保存・再開」で「動画素材・BGMも含める」にチェックを入れてZIP保存してください。写真はGoogle Flowに自動送信されません。')
+    kind=st.radio('登録する種類',['店舗・部屋','スタッフ・インストラクター'],horizontal=True)
+    ref_name=st.text_input('登録名（例：ぽんトレ・トレーニング室 / 山田トレーナー）',key='ref_name')
+    ref_note=st.text_input('特徴・服装・背景などのメモ',key='ref_note')
+    ref_file=st.file_uploader('写真を選択（JPG・PNG・WEBP）',type=['jpg','jpeg','png','webp'],key='reference_upload')
+    if ref_file: st.image(ref_file,caption='登録する参考画像',use_container_width=True)
+    if st.button('📸 この写真を登録',type='primary',disabled=not(ref_name.strip() and ref_file),use_container_width=True):
+        import uuid
+        key=uuid.uuid4().hex[:12]
+        st.session_state.reference_library[key]={'kind':kind,'name':ref_name.strip(),'note':ref_note.strip(),'filename':ref_file.name,'bytes':ref_file.getvalue()}
+        st.success('登録しました。⑥で素材入りZIPを保存すると次回も利用できます。')
+    st.markdown('#### 登録済みの参考画像')
+    if not st.session_state.reference_library: st.caption('まだ写真が登録されていません。')
+    for key,ref in list(st.session_state.reference_library.items()):
+        with st.expander(f"{'🏠' if ref['kind']=='店舗・部屋' else '👤'} {ref['name']}"):
+            st.image(ref['bytes'],width=280)
+            st.caption(ref.get('note',''))
+            st.download_button('⬇️ Google Flowにアップロードする写真を保存',ref['bytes'],file_name=ref['filename'],mime='image/jpeg' if ref['filename'].lower().endswith(('.jpg','.jpeg')) else 'image/png',key='download_ref_'+key,on_click='ignore')
+            if st.button('登録を削除',key='delete_ref_'+key):
+                del st.session_state.reference_library[key]
+                st.rerun()
+    st.warning('実在スタッフの写真・動画は本人の同意を得て使用してください。Flow側の人物画像利用制限や再現精度によっては生成できない場合があります。')
+
 if page == PAGES[0]:
     for k,v in st.session_state.get('config',{}).items():
         if k in ('genre','topic','audience','seconds','style','character','language','location') and 'setting_'+k not in st.session_state:
@@ -250,12 +289,22 @@ if page == PAGES[0]:
     language=st.selectbox('動画内の言語',['日本語（推奨）','映像は無音・字幕のみ日本語','英語'],index=0,key='setting_language')
     location=st.text_input('背景・店舗設定','明るく清潔で親しみやすい日本の施設',key='setting_location')
     st.session_state.config=dict(genre=genre,topic=topic,audience=audience,seconds=seconds,style=style,character=character,location=location,language=language)
+    rooms=['指定なし']+[k for k,v in st.session_state.reference_library.items() if v['kind']=='店舗・部屋']
+    staff=['指定なし']+[k for k,v in st.session_state.reference_library.items() if v['kind']=='スタッフ・インストラクター']
+    st.selectbox('参考にする実際の店舗写真',rooms,format_func=lambda k:st.session_state.reference_library[k]['name'] if k!='指定なし' else '指定なし',key='selected_room')
+    st.selectbox('参考にする実在スタッフ写真',staff,format_func=lambda k:st.session_state.reference_library[k]['name'] if k!='指定なし' else '指定なし',key='selected_staff')
     st.info('台本はテンプレートから自動作成します。外部AI APIは不要です。各シーンは次のタブで自由に編集できます。')
     if st.button('6シーンの構成を作成',type='primary',use_container_width=True):
         st.session_state.prompts={}
         for i,(name,scene) in enumerate(SCENES):
             action=GENRE_ACTION[genre]
-            prompt=(f'縦型9:16、8秒、{style}。{location}。共通人物：{character}。テーマ：{topic}。対象：{audience}。'
+            refs=[]
+            for key,label in [(st.session_state.selected_room,'背景'),(st.session_state.selected_staff,'人物')]:
+                if key!='指定なし' and key in st.session_state.reference_library:
+                    ref=st.session_state.reference_library[key]
+                    refs.append(f'{label}参考画像「{ref["name"]}」をGoogle Flowに手動でアップロードして参照。{ref.get("note","")}。')
+            ref_instruction=' '.join(refs)+' 参考画像の人物・内装の一貫性をできるだけ保つ（完全一致は保証されない）。' if refs else ''
+            prompt=(ref_instruction+f'縦型9:16、8秒、{style}。{location}。共通人物：{character}。テーマ：{topic}。対象：{audience}。'
                     f'シーン{i+1}「{name}」：{scene}。ジャンルに合う描写：{action}。'
                     '実写に近い自然な動き、自然な手指・関節・顔、安定した人物の外見、柔らかい照明。'
                     'カメラはゆっくり滑らかに移動。画面内に文字・ロゴ・字幕は生成しない。'
@@ -320,7 +369,8 @@ if page == PAGES[2]:
                 copy_widget(data['prompt'],i)
                 st.code(data['prompt'],language=None)
         payload={'config':st.session_state.get('config',{}),'scenes':st.session_state.prompts}
-        st.info('📋 プロンプトは上の各シーンで直接コピーできます。JSONの保存は任意です。')
+        st.download_button('⬇️ FlowプロンプトをJSONでダウンロード',json.dumps(payload,ensure_ascii=False,indent=2).encode('utf-8'),file_name='ponte_prompts.json',mime='application/json',on_click='ignore',use_container_width=True)
+        st.info('登録写真は⑦で個別に保存し、Google Flow側に手動でアップロードしてください。')
         st.markdown('**📋 全プロンプトをまとめてコピー**')
         st.code(json.dumps(payload,ensure_ascii=False,indent=2),language='json')
         copy_widget(json.dumps(payload,ensure_ascii=False,indent=2),98)
