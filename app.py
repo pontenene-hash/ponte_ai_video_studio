@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw, ImageFont
 st.set_page_config(page_title='PONTE AI Video Studio', page_icon='🎬', layout='centered')
 st.markdown('''<style>.block-container{padding-top:1rem;max-width:850px}div.stButton>button{border-radius:12px}h1{font-size:1.8rem!important}</style>''',unsafe_allow_html=True)
 st.title('🎬 PONTE AI Video Studio')
-st.caption('iPhone対応 | Google Flow 半自動動画制作 | v1.8・店舗/スタッフ写真登録・Flow参考画像・作業復元')
+st.caption('iPhone対応 | Google Flow 半自動動画制作 | v1.9・写真登録ナビ・テロップなし対応')
 GENRES=['整骨院・整体','鍼灸','症状別の健康情報','ぽんトレ・パーソナルトレーニング','ぽんてアロマサロン','訪問鍼灸・マッサージ']
 GENRE_ACTION={GENRES[0]:'施術前の相談と姿勢・動作の確認',GENRES[1]:'鍼灸師による丁寧な説明と落ち着いた施術環境',GENRES[2]:'日常生活での困りごとと安全なセルフケア',GENRES[3]:'トレーナーの見守りによる無理のない運動',GENRES[4]:'心地よいアロマトリートメントと落ち着いたサロン',GENRES[5]:'利用者宅での相談と穏やかな機能訓練'}
 SCENES=[('共感','悩みを抱える人物の日常シーン'),('困りごと','日常生活で困る具体的な動作'),('背景','悩みに関係する生活習慣を表すシーン'),('対策','無理のない安全な対策・動作'),('サービス','専門スタッフが相談やサポートを行う様子'),('予約案内','安心した表情の人物と清潔な施設の風景')]
@@ -80,7 +80,8 @@ def make_video(files, captions, duration, music, title, ticker_mode="下から�
             src=tmp/f'src_{i}{suffix}';src.write_bytes(upload.getvalue())
             actual=probe_duration(src)
             if actual < 0.2: raise ValueError(f'{i+1}番の動画が読み込めません')
-            overlay=tmp/f'caption_{i}.png';caption_png(captions[i],overlay)
+            overlay=tmp/f'caption_{i}.png'
+            if ticker_mode!='テロップなし': caption_png(captions[i],overlay)
             dst=tmp/f'part_{i}.mp4'
             vf='scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1,fps=24,format=yuv420p'
             # Freeze final frame if source is shorter than requested duration
@@ -93,7 +94,11 @@ def make_video(files, captions, duration, music, title, ticker_mode="下から�
                 overlay_expr='max(0\,W-min(t*850\,W)):0'
             elif ticker_mode=='フェードイン':
                 overlay_filter='[1:v]format=rgba,fade=t=in:st=0:d=1:alpha=1[cap];'
-            run(['ffmpeg','-y','-loglevel','error','-i',str(src),'-loop','1','-i',str(overlay),'-filter_complex',f'[0:v]{vf}[base];{overlay_filter}[base][cap]overlay={overlay_expr}:shortest=0[out]','-map','[out]','-t',str(per),'-an','-c:v','libx264','-preset','ultrafast','-crf','29','-pix_fmt','yuv420p','-movflags','+faststart',str(dst)])
+            if ticker_mode=='テロップなし':
+                cmd=['ffmpeg','-y','-loglevel','error','-i',str(src),'-vf',vf,'-t',str(per),'-an','-c:v','libx264','-preset','ultrafast','-crf','29','-pix_fmt','yuv420p','-movflags','+faststart',str(dst)]
+            else:
+                cmd=['ffmpeg','-y','-loglevel','error','-i',str(src),'-loop','1','-i',str(overlay),'-filter_complex',f'[0:v]{vf}[base];{overlay_filter}[base][cap]overlay={overlay_expr}:shortest=0[out]','-map','[out]','-t',str(per),'-an','-c:v','libx264','-preset','ultrafast','-crf','29','-pix_fmt','yuv420p','-movflags','+faststart',str(dst)]
+            run(cmd)
             parts.append(dst)
         listing=tmp/'concat.txt';listing.write_text(''.join(f"file '{p}'\n" for p in parts))
         silent=tmp/'silent.mp4'
@@ -263,7 +268,10 @@ if page == '⑦ 店舗・人物登録':
         import uuid
         key=uuid.uuid4().hex[:12]
         st.session_state.reference_library[key]={'kind':kind,'name':ref_name.strip(),'note':ref_note.strip(),'filename':ref_file.name,'bytes':ref_file.getvalue()}
-        st.success('登録しました。⑥で素材入りZIPを保存すると次回も利用できます。')
+        st.success('登録しました。①企画に戻り、参考写真の選択欄から選んでください。⑥で素材入りZIPを保存すると次回も利用できます。')
+        if st.button('① 企画へ戻って写真を選ぶ',key='go_plan_after_ref'):
+            st.session_state.active_page='① 企画'
+            st.rerun()
     st.markdown('#### 登録済みの参考画像')
     if not st.session_state.reference_library: st.caption('まだ写真が登録されていません。')
     for key,ref in list(st.session_state.reference_library.items()):
@@ -274,6 +282,9 @@ if page == '⑦ 店舗・人物登録':
             if st.button('登録を削除',key='delete_ref_'+key):
                 del st.session_state.reference_library[key]
                 st.rerun()
+    if st.button('⬅ ① 企画に戻る',key='return_to_plan',use_container_width=True):
+        st.session_state.active_page='① 企画'
+        st.rerun()
     st.warning('実在スタッフの写真・動画は本人の同意を得て使用してください。Flow側の人物画像利用制限や再現精度によっては生成できない場合があります。')
 
 if page == PAGES[0]:
@@ -293,6 +304,20 @@ if page == PAGES[0]:
     staff=['指定なし']+[k for k,v in st.session_state.reference_library.items() if v['kind']=='スタッフ・インストラクター']
     st.selectbox('参考にする実際の店舗写真',rooms,format_func=lambda k:st.session_state.reference_library[k]['name'] if k!='指定なし' else '指定なし',key='selected_room')
     st.selectbox('参考にする実在スタッフ写真',staff,format_func=lambda k:st.session_state.reference_library[k]['name'] if k!='指定なし' else '指定なし',key='selected_staff')
+    if len(rooms)==1 or len(staff)==1:
+        missing=[]
+        if len(rooms)==1: missing.append('店舗写真')
+        if len(staff)==1: missing.append('スタッフ写真')
+        st.warning('・'.join(missing)+'が未登録です。「⑦ 店舗・人物登録」で写真を追加すると、この選択欄に表示されます。')
+        if st.button('📸 写真登録画面へ移動',use_container_width=True):
+            st.session_state.active_page='⑦ 店舗・人物登録'
+            st.rerun()
+    else:
+        st.success('登録済みの店舗・スタッフ写真を選べます。')
+    if st.session_state.selected_room!='指定なし' and st.session_state.selected_room in st.session_state.reference_library:
+        st.image(st.session_state.reference_library[st.session_state.selected_room]['bytes'],caption='選択中の店舗写真',width=260)
+    if st.session_state.selected_staff!='指定なし' and st.session_state.selected_staff in st.session_state.reference_library:
+        st.image(st.session_state.reference_library[st.session_state.selected_staff]['bytes'],caption='選択中のスタッフ写真',width=260)
     st.info('台本はテンプレートから自動作成します。外部AI APIは不要です。各シーンは次のタブで自由に編集できます。')
     if st.button('6シーンの構成を作成',type='primary',use_container_width=True):
         st.session_state.prompts={}
@@ -393,8 +418,11 @@ if page == PAGES[3]:
                 st.rerun()
             uploads.append(SavedUpload(saved['name'],saved['bytes']))
         else: uploads.append(None)
-    ticker_mode=st.selectbox('🎞️ 日本語コメントのテロップ演出',['下からスライドイン','右からスライドイン','フェードイン','固定表示'],help='③の各シーンで入力した日本語コメントを、MP4結合時に映像へ焼き込みます。')
-    st.info('字幕は③の各シーン「完成動画の字幕」で変更できます。Flow内の文字生成は使わず、MP4結合時に正確な日本語字幕を追加します。')
+    ticker_mode=st.selectbox('🎞️ 日本語コメントのテロップ演出',['テロップなし','下からスライドイン','右からスライドイン','フェードイン','固定表示'],help='テロップなしを選ぶと字幕画像を作成せず、動画とBGMのみを結合します。その他は③の日本語コメントを焼き込みます。')
+    if ticker_mode=='テロップなし':
+        st.info('テロップなし：完成MP4に文字を重ねません。BGMは追加できます。')
+    else:
+        st.info('字幕は③の各シーン「完成動画の字幕」で変更できます。Flow内の文字生成は使わず、MP4結合時に正確な日本語字幕を追加します。')
     music=st.file_uploader('BGM（任意・商用利用可能なMP3/WAV/M4A）',type=['mp3','wav','m4a'])
     if music: st.session_state.music_asset={'name':music.name,'bytes':music.getvalue()}
     if st.session_state.music_asset:
