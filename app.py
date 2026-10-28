@@ -2,12 +2,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 import json, io, os, tempfile, subprocess, zipfile, shutil, re, math, datetime
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 st.set_page_config(page_title='PONTE AI Video Studio', page_icon='🎬', layout='centered')
 st.markdown('''<style>.block-container{padding-top:1rem;max-width:850px}div.stButton>button{border-radius:12px}h1{font-size:1.8rem!important}</style>''',unsafe_allow_html=True)
 st.title('🎬 PONTE AI Video Studio')
-st.caption('iPhone対応 | Google Flow 半自動動画制作 | v1.9・写真登録ナビ・テロップなし対応')
+st.caption('iPhone対応 | Google Flow 半自動動画制作 | v2.0・企画内写真登録・写真の向き修正')
 GENRES=['整骨院・整体','鍼灸','症状別の健康情報','ぽんトレ・パーソナルトレーニング','ぽんてアロマサロン','訪問鍼灸・マッサージ']
 GENRE_ACTION={GENRES[0]:'施術前の相談と姿勢・動作の確認',GENRES[1]:'鍼灸師による丁寧な説明と落ち着いた施術環境',GENRES[2]:'日常生活での困りごとと安全なセルフケア',GENRES[3]:'トレーナーの見守りによる無理のない運動',GENRES[4]:'心地よいアロマトリートメントと落ち着いたサロン',GENRES[5]:'利用者宅での相談と穏やかな機能訓練'}
 SCENES=[('共感','悩みを抱える人物の日常シーン'),('困りごと','日常生活で困る具体的な動作'),('背景','悩みに関係する生活習慣を表すシーン'),('対策','無理のない安全な対策・動作'),('サービス','専門スタッフが相談やサポートを行う様子'),('予約案内','安心した表情の人物と清潔な施設の風景')]
@@ -23,6 +23,58 @@ if 'assets' not in st.session_state: st.session_state.assets={}
 if 'music_asset' not in st.session_state: st.session_state.music_asset=None
 if 'config' not in st.session_state: st.session_state.config={}
 if 'daily_settings' not in st.session_state: st.session_state.daily_settings={'daily_limit':50,'cost_per_clip':10,'other_daily':0}
+
+
+def normalized_reference(upload):
+    """Apply iPhone EXIF orientation once, and store display-ready JPEG/PNG bytes."""
+    raw=upload.getvalue()
+    with Image.open(io.BytesIO(raw)) as opened:
+        corrected=ImageOps.exif_transpose(opened)
+        if corrected.mode not in ('RGB','RGBA'):
+            corrected=corrected.convert('RGB')
+        # Store as PNG for alpha images, JPEG otherwise. EXIF orientation removed.
+        transparent=corrected.mode=='RGBA'
+        out=io.BytesIO()
+        corrected.save(out,format='PNG' if transparent else 'JPEG',quality=92)
+        ext='png' if transparent else 'jpg'
+        return out.getvalue(),ext
+
+def reference_registration(kind, suffix):
+    """Render photo registration without mutating a widget key after creation."""
+    st.markdown('#### '+('🏠 店舗・部屋の写真' if kind=='店舗・部屋' else '👤 スタッフの写真'))
+    name=st.text_input('登録名',placeholder='例：ぽんトレ・トレーニング室' if kind=='店舗・部屋' else '例：担当トレーナー',key='ref_name_'+suffix)
+    note=st.text_input('写真の説明（任意）',key='ref_note_'+suffix)
+    upload=st.file_uploader('写真を選択（JPG・PNG・WEBP）',type=['jpg','jpeg','png','webp'],key='ref_upload_'+suffix)
+    corrected=None
+    if upload is not None:
+        try:
+            corrected,ext=normalized_reference(upload)
+            st.image(corrected,caption='向きを補正した登録プレビュー',use_container_width=True)
+        except Exception as e:
+            st.error(f'写真を読み込めません：{e}')
+    if st.button('📸 この写真を登録',key='register_'+suffix,disabled=not(name.strip() and corrected is not None),use_container_width=True):
+        import uuid
+        ident=uuid.uuid4().hex[:12]
+        st.session_state.reference_library[ident]={'kind':kind,'name':name.strip(),'note':note.strip(),'filename':f'{ident}.{ext}','bytes':corrected}
+        st.session_state['selected_room' if kind=='店舗・部屋' else 'selected_staff']=ident
+        st.session_state['registration_notice']='写真を登録しました。下の選択欄で確認できます。'
+        st.rerun()
+
+def reference_selector(kind, suffix):
+    keys=['指定なし']+[k for k,v in st.session_state.reference_library.items() if v['kind']==kind]
+    statekey='selected_room' if kind=='店舗・部屋' else 'selected_staff'
+    if st.session_state.get(statekey) not in keys:
+        st.session_state[statekey]='指定なし'
+    st.selectbox('動画に使用する'+('店舗写真' if kind=='店舗・部屋' else 'スタッフ写真'),keys,format_func=lambda k:st.session_state.reference_library[k]['name'] if k!='指定なし' else '指定なし',key=statekey)
+    selected=st.session_state[statekey]
+    if selected!='指定なし':
+        ref=st.session_state.reference_library[selected]
+        st.image(ref['bytes'],caption=ref['name'],width=280)
+        st.download_button('⬇️ Google Flowに渡す参考写真を保存',ref['bytes'],file_name=ref['filename'],mime='image/png' if ref['filename'].endswith('.png') else 'image/jpeg',key='ref_download_'+suffix,on_click='ignore')
+        if st.button('この登録写真を削除',key='ref_delete_'+suffix):
+            del st.session_state.reference_library[selected]
+            st.session_state[statekey]='指定なし'
+            st.rerun()
 
 
 def font_path():
@@ -169,7 +221,15 @@ def restore_project(blob):
         for key,ref in data.get('references',{}).items():
             matches=[n for n in names if n.startswith('references/'+key+'.')]
             if matches:
-                st.session_state.reference_library[key]={**ref,'bytes':z.read(matches[0])}
+                
+                old_bytes=z.read(matches[0])
+                try:
+                    class RefUpload:
+                        def getvalue(self): return old_bytes
+                    fixed,ext=normalized_reference(RefUpload())
+                    st.session_state.reference_library[key]={**ref,'bytes':fixed,'filename':key+'.'+ext}
+                except Exception:
+                    st.session_state.reference_library[key]={**ref,'bytes':old_bytes}
         st.session_state.selected_room=data.get('selected_room','指定なし')
         st.session_state.selected_staff=data.get('selected_staff','指定なし')
         st.session_state.assets={}
@@ -202,7 +262,7 @@ def restore_json(blob):
         st.session_state[f'caption_{i}']=v.get('caption','')
     return '台本・プロンプトを復元しました。動画素材は必要に応じて再アップロードしてください。'
 
-PAGES=['① 企画','② 日別制作計画','③ Flowプロンプト','④ 素材・編集','⑤ 完成・保存','⑦ 店舗・人物登録']
+PAGES=['① 企画','② 日別制作計画','③ Flowプロンプト','④ 素材・編集','⑤ 完成・保存']
 st.info('📱 ファイルのプレビュー画面へ移動しないよう、計画・プロンプトはアプリ内で表示・コピーできます。動画・ZIPの保存時のみiPhoneの保存画面が開く場合があります。')
 page=st.segmented_control('📍 画面を切り替える',PAGES+['⑥ 保存・再開'],default=PAGES[0],key='active_page',selection_mode='single') or PAGES[0]
 st.caption('画面を切り替えても作業は保持されます。ただしStreamlitの再起動・接続切断に備えてZIPバックアップを保存してください。')
@@ -256,37 +316,6 @@ if page == '⑥ 保存・再開':
         st.success(st.session_state.pop('restore_notice'))
     st.info('旧版の ponte_prompts.json は台本のみ、ponte_daily_plan.json は進捗のみ復元できます。両方を完全統合するには、それぞれ順に読み込んでください。')
     st.markdown('**iPhoneでファイル画面から戻るには**：Safariに戻り、タブ一覧からStreamlitの画面を選びます。ChatGPT内ブラウザの場合はSafariでアプリURLを開き直す方が安定します。')
-if page == '⑦ 店舗・人物登録':
-    st.subheader('🏠 店舗写真・実在スタッフを登録')
-    st.info('写真は現在のセッション内に保存されます。次回も使うには⑥「保存・再開」で「動画素材・BGMも含める」にチェックを入れてZIP保存してください。写真はGoogle Flowに自動送信されません。')
-    kind=st.radio('登録する種類',['店舗・部屋','スタッフ・インストラクター'],horizontal=True)
-    ref_name=st.text_input('登録名（例：ぽんトレ・トレーニング室 / 山田トレーナー）',key='ref_name')
-    ref_note=st.text_input('特徴・服装・背景などのメモ',key='ref_note')
-    ref_file=st.file_uploader('写真を選択（JPG・PNG・WEBP）',type=['jpg','jpeg','png','webp'],key='reference_upload')
-    if ref_file: st.image(ref_file,caption='登録する参考画像',use_container_width=True)
-    if st.button('📸 この写真を登録',type='primary',disabled=not(ref_name.strip() and ref_file),use_container_width=True):
-        import uuid
-        key=uuid.uuid4().hex[:12]
-        st.session_state.reference_library[key]={'kind':kind,'name':ref_name.strip(),'note':ref_note.strip(),'filename':ref_file.name,'bytes':ref_file.getvalue()}
-        st.success('登録しました。①企画に戻り、参考写真の選択欄から選んでください。⑥で素材入りZIPを保存すると次回も利用できます。')
-        if st.button('① 企画へ戻って写真を選ぶ',key='go_plan_after_ref'):
-            st.session_state.active_page='① 企画'
-            st.rerun()
-    st.markdown('#### 登録済みの参考画像')
-    if not st.session_state.reference_library: st.caption('まだ写真が登録されていません。')
-    for key,ref in list(st.session_state.reference_library.items()):
-        with st.expander(f"{'🏠' if ref['kind']=='店舗・部屋' else '👤'} {ref['name']}"):
-            st.image(ref['bytes'],width=280)
-            st.caption(ref.get('note',''))
-            st.download_button('⬇️ Google Flowにアップロードする写真を保存',ref['bytes'],file_name=ref['filename'],mime='image/jpeg' if ref['filename'].lower().endswith(('.jpg','.jpeg')) else 'image/png',key='download_ref_'+key,on_click='ignore')
-            if st.button('登録を削除',key='delete_ref_'+key):
-                del st.session_state.reference_library[key]
-                st.rerun()
-    if st.button('⬅ ① 企画に戻る',key='return_to_plan',use_container_width=True):
-        st.session_state.active_page='① 企画'
-        st.rerun()
-    st.warning('実在スタッフの写真・動画は本人の同意を得て使用してください。Flow側の人物画像利用制限や再現精度によっては生成できない場合があります。')
-
 if page == PAGES[0]:
     for k,v in st.session_state.get('config',{}).items():
         if k in ('genre','topic','audience','seconds','style','character','language','location') and 'setting_'+k not in st.session_state:
@@ -300,24 +329,17 @@ if page == PAGES[0]:
     language=st.selectbox('動画内の言語',['日本語（推奨）','映像は無音・字幕のみ日本語','英語'],index=0,key='setting_language')
     location=st.text_input('背景・店舗設定','明るく清潔で親しみやすい日本の施設',key='setting_location')
     st.session_state.config=dict(genre=genre,topic=topic,audience=audience,seconds=seconds,style=style,character=character,location=location,language=language)
-    rooms=['指定なし']+[k for k,v in st.session_state.reference_library.items() if v['kind']=='店舗・部屋']
-    staff=['指定なし']+[k for k,v in st.session_state.reference_library.items() if v['kind']=='スタッフ・インストラクター']
-    st.selectbox('参考にする実際の店舗写真',rooms,format_func=lambda k:st.session_state.reference_library[k]['name'] if k!='指定なし' else '指定なし',key='selected_room')
-    st.selectbox('参考にする実在スタッフ写真',staff,format_func=lambda k:st.session_state.reference_library[k]['name'] if k!='指定なし' else '指定なし',key='selected_staff')
-    if len(rooms)==1 or len(staff)==1:
-        missing=[]
-        if len(rooms)==1: missing.append('店舗写真')
-        if len(staff)==1: missing.append('スタッフ写真')
-        st.warning('・'.join(missing)+'が未登録です。「⑦ 店舗・人物登録」で写真を追加すると、この選択欄に表示されます。')
-        if st.button('📸 写真登録画面へ移動',use_container_width=True):
-            st.session_state.active_page='⑦ 店舗・人物登録'
-            st.rerun()
-    else:
-        st.success('登録済みの店舗・スタッフ写真を選べます。')
-    if st.session_state.selected_room!='指定なし' and st.session_state.selected_room in st.session_state.reference_library:
-        st.image(st.session_state.reference_library[st.session_state.selected_room]['bytes'],caption='選択中の店舗写真',width=260)
-    if st.session_state.selected_staff!='指定なし' and st.session_state.selected_staff in st.session_state.reference_library:
-        st.image(st.session_state.reference_library[st.session_state.selected_staff]['bytes'],caption='選択中のスタッフ写真',width=260)
+    st.markdown('### 📸 店舗・スタッフの写真登録と選択')
+    st.caption('写真はここで登録できます。iPhoneの写真の向きを自動補正します。登録した写真はGoogle Flowに別途アップロードしてください。')
+    if st.session_state.get('registration_notice'):
+        st.success(st.session_state.pop('registration_notice'))
+    with st.expander('🏠 店舗・部屋の写真を追加',expanded=not any(v['kind']=='店舗・部屋' for v in st.session_state.reference_library.values())):
+        reference_registration('店舗・部屋','room')
+    reference_selector('店舗・部屋','room')
+    with st.expander('👤 スタッフの写真を追加',expanded=not any(v['kind']=='スタッフ・インストラクター' for v in st.session_state.reference_library.values())):
+        reference_registration('スタッフ・インストラクター','staff')
+    reference_selector('スタッフ・インストラクター','staff')
+    st.caption('写真の登録名を入力し、写真を選択すると登録ボタンが有効になります。次回も使う場合は⑥保存・再開でZIPバックアップを保存してください。')
     st.info('台本はテンプレートから自動作成します。外部AI APIは不要です。各シーンは次のタブで自由に編集できます。')
     if st.button('6シーンの構成を作成',type='primary',use_container_width=True):
         st.session_state.prompts={}
